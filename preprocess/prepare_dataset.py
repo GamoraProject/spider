@@ -7,6 +7,7 @@ from process_sql import get_sql
 from preprocess.schema import Schema, get_schemas_from_json
 from transformers.models.auto import AutoTokenizer
 
+
 def get_schema_info(db):
     """
     Get database's schema, which is a dict with table name as key
@@ -16,6 +17,7 @@ def get_schema_info(db):
     """
 
     schema = {}
+    fkeys = {}
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
 
@@ -31,10 +33,18 @@ def get_schema_info(db):
             schema[table].append([str(col[1].lower()), col[2], col[5]])
         #schema[table] = [str(col[1].lower()) for col in cursor.fetchall()]
 
-    return schema
+        fkeys[table] = []
+        cursor.execute("PRAGMA foreign_key_list(" + table + ");")
+        for fk in cursor.fetchall():
+            fkeys[table].append([fk[2], fk[3], fk[4]])
 
-def create_sqlite(data_folder, schema_name):
-    con = sqlite3.connect(os.path.join(data_folder, "asanadb.sqlite"))
+    return schema, fkeys
+
+def create_sqlite(data_folder, schema_name, db_name):
+    # Remove the DB file if it exists
+    if os.path.exists(os.path.join(data_folder, db_name)):
+        os.remove(os.path.join(data_folder, db_name))
+    con = sqlite3.connect(os.path.join(data_folder, db_name))
     cur = con.cursor()
     with open(os.path.join(data_folder, schema_name), 'r') as sql_file:
         result_iterator = cur.executescript(sql_file.read())
@@ -45,14 +55,16 @@ def create_tables_json(schema_name, output_name):
     Parse that can take a schema and create tables.json file
     The result is a dictionary of lists
     """
-    schema = get_schema_info(schema_name)
+    schema, fkeys = get_schema_info(schema_name)
     # part 1 - "column_names"
     column_names = []
     column_names.append([-1, '*'])
     table_names = []
     column_types = []
-    col_counter = 0
+    column_types.append('TEXT')
+    col_counter = 1
     primary_keys = []
+    foreign_keys = []
     for k, name in enumerate(schema.keys()):
         table_names.append(name)
         for col in schema[name]:
@@ -61,6 +73,29 @@ def create_tables_json(schema_name, output_name):
             if col[2] == 1:
                 primary_keys.append(col_counter)
             col_counter = col_counter + 1
+
+    # Create foreign keys
+    # Check if this column belongs to one of the foreign keys
+    for fk_k, fk_name in enumerate(fkeys.keys()):
+        if len(fkeys[fk_name]) == 0:
+            continue
+        for fk_details in fkeys[fk_name]:
+            pass
+            # Find the number of column fk_details[1] in project fk_name with ID fk_k
+            second_fk = -1
+            first_fk = -1
+            # Find the ID of the first table
+            first_table_id = -1
+            for table_k, tb_name in enumerate(table_names):
+                if fk_details[0].lower() == tb_name:
+                    first_table_id = table_k
+            if first_table_id >= 0:
+                for col_k, column in enumerate(column_names):
+                    if column[0] == fk_k and column[1].lower() == fk_details[1].lower():
+                        second_fk = col_k
+                    if column[0] == first_table_id and column[1] == fk_details[2].lower():
+                        first_fk = col_k
+                foreign_keys.append([first_fk, second_fk])
 
     # Go over all columns and create tuples of their names
     pass
@@ -71,7 +106,10 @@ def create_tables_json(schema_name, output_name):
     final_dict['primary_keys'] = primary_keys
     final_dict['table_names'] = table_names
     final_dict['table_names_original'] = table_names
-    final_dict['foreign_keys'] = [[5, 0], [6, 0], [26, 0]]
+    final_dict['foreign_keys'] = foreign_keys # [[5, 0], [6, 0], [26, 0]]
+
+    # Important - All columns start from 0 and include the -1
+
     # foreign_keys - should be added manually
     with open(output_name,"w") as dump_f:
         json.dump([final_dict], dump_f)
@@ -150,7 +188,26 @@ if __name__ == "__main__":
     """
     Given CSV file with questions and ground truth and a sql.schema file, prepare all the files needed
     for running spider
+    SQL.schema should be adapted for SQLite. It may include both definitions of the table and the actual data
     """
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--in_data_folder', type=str, help='Storage path for input and temporary files',
+                        default='/home/paperspace/data/train_asana/')
+    parser.add_argument('--out_data_folder', type=str, help='Storage path for output files',
+                        default='/home/paperspace/data/asana/')
+    parser.add_argument('--schema_file', type=str, help='Asana SQLLite schema file',
+                        default='schema.sql')
+    parser.add_argument('--db_file', type=str, help='Asana SQLLite database name',
+                        default='asana.sqlite')
+
+    args = parser.parse_args()
+    create_sqlite(data_folder=args.in_data_folder, schema_name=args.schema_file, db_name=args.db_file)
+
+    create_tables_json(os.path.join(args.in_data_folder, args.db_file),
+                       os.path.join(args.in_data_folder, 'tables_new.json'))
+
+
     data_folder = '/home/paperspace/data/asana/'
     asana_small_scheme = 'small_schema.sql'
     create_sqlite(data_folder=data_folder, schema_name=asana_small_scheme)
